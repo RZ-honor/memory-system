@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "post_tool_use": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D:/MINICONDA/envs/memory-system/python.exe D:/claude/memory-system/main.py hook"
+          }
+        ]
+      }
+    ],
+    "session_end": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D:/MINICONDA/envs/memory-system/python.exe D:/claude/memory-system/main.py hook"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,46 @@
+# Database and data
+data/
+*.db
+*.sqlite
+
+# Logs
+logs/
+
+# Environment and secrets
+.env
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Node
+node_modules/
+package-lock.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Model files (download separately)
+models/
+
+# Test files
+test_*.py

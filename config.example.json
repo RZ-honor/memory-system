@@ -1,0 +1,55 @@
+{
+  "db_path": "data/memory.db",
+  "log_dir": "logs",
+  "log_level": "INFO",
+  "llm": {
+    "provider": "anthropic",
+    "base_url": "YOUR_API_BASE_URL",
+    "api_key": "YOUR_API_KEY",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 4096,
+    "timeout": 60,
+    "max_retries": 3
+  },
+  "embedding": {
+    "enabled": true,
+    "model_name": "all-MiniLM-L6-v2",
+    "dimension": 384
+  },
+  "fusion": {
+    "enabled": true,
+    "interval_seconds": 300,
+    "similarity_threshold": 0.75,
+    "contradiction_window_days": 7
+  },
+  "pruning": {
+    "enabled": true,
+    "interval_hours": 6,
+    "expire_days": 30,
+    "idle_threshold_seconds": 300,
+    "auto_on_idle": true
+  },
+  "hook": {
+    "skip_tools": ["TodoWrite", "AskUserQuestion", "ListMcpResourcesTool"],
+    "max_queue_size": 500,
+    "batch_size": 5
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 38800
+  },
+  "context": {
+    "inject_on_session_start": true,
+    "strategy": "minimal_index",
+    "max_chars": 800,
+    "include_types": ["user", "reference", "feedback", "project"],
+    "note": "只注入知识索引和最近记忆标题，详情通过搜索按需加载"
+  },
+  "reasoning": {
+    "enabled": true,
+    "extract_on_session_end": true,
+    "max_chains_per_session": 3,
+    "inject_reasoning_context": true,
+    "reasoning_context_max_chars": 300
+  }
+}

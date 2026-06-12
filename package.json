@@ -1,0 +1,7 @@
+{
+  "devDependencies": {
+    "@adonis0123/react-best-practices": "^1.0.11",
+    "picasso-skill": "^3.0.0",
+    "superpowers-zh": "^1.5.0"
+  }
+}
