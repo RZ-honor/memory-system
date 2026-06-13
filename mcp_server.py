@@ -20,7 +20,14 @@ db.connect()
 
 mcp = FastMCP(
     "memory-system",
-    instructions="Persistent memory system with three-factor retrieval (recency + importance + relevance), FSRS decay, and knowledge fusion.",
+    instructions="""Persistent memory system with three-factor retrieval (recency + importance + relevance),
+FSRS decay, and knowledge fusion.
+
+CRITICAL WORKFLOW:
+1. At the START of every conversation, call inject_context with the user's first message
+2. Before answering questions about past work, call search_memory first
+3. After completing significant work, call save_memory to record learnings
+4. At session end, call run_maintenance to clean up memories""",
 )
 
 
@@ -118,22 +125,44 @@ def save_memory(
 
 
 @mcp.tool()
-def inject_context(message: str, project: str = None, max_chars: int = 1000) -> str:
-    """Get relevant memory context for the current user message.
+def inject_context(message: str, project: str = None, max_chars: int = 1000, message_count: int = 1) -> str:
+    """MANDATORY: Call this at the START of every conversation turn to inject relevant past knowledge.
 
-    Call this at the START of a conversation turn to inject relevant past knowledge.
-    Uses three-factor search to find the most relevant memories for the current context.
+    This tool MUST be called:
+    1. At the beginning of every new conversation
+    2. When the user asks about past work, decisions, or history
+    3. Before answering questions that might benefit from past context
+
+    Uses progressive retrieval strategy:
+    - message_count=1 (first message): Fast keyword search, top 3 results
+    - message_count=2-3: Full three-factor search, top 5 results
+    - message_count=4+: On-demand search, only when relevant
 
     Args:
         message: The user's current message or question
         project: Optional project filter
         max_chars: Max character count for context (default 1000)
+        message_count: Number of messages in current session (for progressive retrieval)
     """
-    results = retriever.search(message, project=project, limit=5, use_vector=True)
+    # Progressive retrieval strategy
+    if message_count == 1:
+        # Phase 1: Fast keyword search, no embedding needed
+        keywords = retriever.extract_keywords(message)
+        results = db.search_by_keywords(keywords, project=project, limit=3)
+        search_type = "keyword"
+    elif message_count <= 3:
+        # Phase 2: Full three-factor search
+        results = retriever.search(message, project=project, limit=5, use_vector=True)
+        search_type = "three-factor"
+    else:
+        # Phase 3: On-demand only (still search but with lower limit)
+        results = retriever.search(message, project=project, limit=3, use_vector=True)
+        search_type = "on-demand"
+
     if not results:
         return ""
 
-    lines = [f"[Memory System] Found {len(results)} relevant memories:"]
+    lines = [f"[Memory System] Found {len(results)} relevant memories ({search_type}):"]
     total = len(lines[0])
 
     for r in results:
@@ -156,7 +185,7 @@ def inject_context(message: str, project: str = None, max_chars: int = 1000) -> 
 
     # Also check for matching module and its reasoning chains
     module_id, module_name, score = retriever.match_module(message, project=project)
-    if module_id and score >= 0.3:
+    if module_id and score >= 0.5:  # Increased threshold from 0.3 to 0.5
         chains = db.list_reasoning_chains(module_id=module_id, limit=2)
         if chains:
             chain_line = f"  Related reasoning ({len(chains)} chains):"
@@ -169,6 +198,57 @@ def inject_context(message: str, project: str = None, max_chars: int = 1000) -> 
                     if total + len(cl) <= max_chars:
                         lines.append(cl)
                         total += len(cl)
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def search_with_web_fallback(query: str, project: str = None, web_search_results: str = None) -> str:
+    """Search memories with optional web search context integration.
+
+    Use this when you need to combine past knowledge with current web search results.
+    This helps balance historical context with up-to-date information.
+
+    Args:
+        query: Search query
+        project: Optional project filter
+        web_search_results: Optional web search results to integrate with memory search
+    """
+    # Search memories
+    memory_results = retriever.search(query, project=project, limit=3, use_vector=True)
+
+    lines = []
+
+    if memory_results:
+        lines.append("=== Memory Search Results ===")
+        for i, m in enumerate(memory_results, 1):
+            title = m.get("title", "")
+            narrative = m.get("narrative", "")
+            importance = m.get("importance", 5)
+
+            entry = f"{i}. {title}"
+            if importance >= 8:
+                entry += " ★"
+            if narrative:
+                entry += f"\n   {narrative[:150]}"
+            lines.append(entry)
+
+    if web_search_results:
+        lines.append("\n=== Web Search Results ===")
+        lines.append(web_search_results[:500])  # Limit web results
+
+    # Provide balance recommendation
+    if memory_results and web_search_results:
+        lines.append("\n=== Context Balance ===")
+        lines.append("Use memory results for historical context and decisions.")
+        lines.append("Use web results for current information and best practices.")
+        lines.append("Combine both for comprehensive answers.")
+    elif memory_results:
+        lines.append("\n=== Recommendation ===")
+        lines.append("Found relevant memories. Use these for historical context.")
+    elif web_search_results:
+        lines.append("\n=== Recommendation ===")
+        lines.append("No relevant memories found. Rely on web search results.")
 
     return "\n".join(lines)
 

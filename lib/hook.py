@@ -218,7 +218,7 @@ def get_context_for_injection(project, session_id=None, user_message="", max_cha
 
     # Also check if a module matches
     module_id, module_name, score = retriever.match_module(user_message, project=None)
-    if module_id and score >= 0.3:
+    if module_id and score >= 0.5:
         chains = db.list_reasoning_chains(module_id=module_id, limit=2)
         if chains:
             lines.append(f"相关推理链 ({len(chains)} 条):")

@@ -202,7 +202,7 @@ def retrieve_for_context(query, project=None, limit=10, phase=1):
     """
     if phase == 1:
         # Fast keyword match, no embedding needed
-        keywords = _extract_keywords(query)
+        keywords = extract_keywords(query)
         results = db.search_by_keywords(keywords, project=project, limit=min(limit, 5))
         for r in results:
             db.refresh_memory(r["id"])
@@ -213,7 +213,7 @@ def retrieve_for_context(query, project=None, limit=10, phase=1):
     return []
 
 
-def _extract_keywords(text):
+def extract_keywords(text):
     """Extract meaningful keywords from text for fast search."""
     # Simple keyword extraction: split, filter stopwords and short words
     stopwords = {"the", "a", "an", "is", "are", "was", "were", "be", "been",
