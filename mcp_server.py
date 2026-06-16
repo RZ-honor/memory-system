@@ -5,7 +5,7 @@ Run with:
 
 Registers as stdio MCP server in Claude Code settings.json.
 """
-import sys, os, json
+import sys, os, json, threading, time
 
 # Ensure lib is importable
 sys.path.insert(0, os.path.dirname(__file__))
@@ -17,6 +17,98 @@ _log = logger.get()
 
 # Initialize DB on startup
 db.connect()
+
+
+def _process_pending_on_startup():
+    """Process pending retry items when MCP server starts.
+
+    This ensures that items that failed in previous sessions are retried
+    when Claude Code is reopened.
+    """
+    try:
+        # Check for pending items
+        stats = db.queue_stats()
+        pending_count = sum(r["cnt"] for r in stats if r["status"] in ("pending", "retry"))
+
+        if pending_count > 0:
+            _log.info(f"发现 {pending_count} 条待处理队列项，开始处理...")
+
+            # Process retryable items
+            retryable = db.dequeue_retryable(limit=20)
+            success = 0
+            for item in retryable:
+                try:
+                    _process_queue_item(item)
+                    db.mark_processed(item["id"])
+                    success += 1
+                except Exception as e:
+                    _log.warning(f"启动重试失败 #{item['id']}: {e}")
+                    db.mark_failed(item["id"], str(e))
+
+            if success > 0:
+                _log.info(f"启动重试完成: {success}/{len(retryable)} 条成功处理")
+
+            # Also process pending items
+            pending = db.dequeue(limit=10)
+            for item in pending:
+                try:
+                    _process_queue_item(item)
+                    db.mark_processed(item["id"])
+                    success += 1
+                except Exception as e:
+                    _log.warning(f"启动处理失败 #{item['id']}: {e}")
+                    db.mark_failed(item["id"], str(e))
+
+            return {"processed": success, "total": pending_count}
+        else:
+            _log.info("队列为空，无需处理")
+            return {"processed": 0, "total": 0}
+    except Exception as e:
+        _log.error(f"启动处理队列错误: {e}")
+        return {"error": str(e)}
+
+
+def _process_queue_item(item):
+    """Process a single queue item. Raises on LLM/network failures."""
+    event = item["hook_event"]
+    project = item["project"]
+    session = item["session_uuid"]
+
+    if event == "post_tool_use":
+        tool_name = item["tool_name"]
+        tool_input = _safe_json(item["tool_input"])
+        tool_response = _safe_json(item["tool_response"])
+        observer.process_interaction(
+            project=project,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_response=tool_response,
+            session_uuid=session,
+        )
+    elif event == "session_end":
+        extra = _safe_json(item.get("extra"), default={}) or {}
+        interactions = extra.get("interactions", [])
+        if interactions:
+            saved = observer.process_batch(project, interactions, session_uuid=session)
+            _log.info(f"SessionEnd [{session}]: saved {saved} observations")
+            observer.process_reflection(project, session, interactions)
+    else:
+        _log.debug(f"未处理的队列事件: {event}")
+
+
+def _safe_json(text, default=None):
+    if not text:
+        return default if default is not None else ""
+    if isinstance(text, (dict, list)):
+        return text
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+
+
+# Process pending items on startup
+_startup_result = _process_pending_on_startup()
 
 mcp = FastMCP(
     "memory-system",
@@ -381,6 +473,88 @@ def extract_from_session(project: str, interactions: list[dict]) -> str:
     )
 
     return f"Extracted {saved} memories from {len(interactions)} interactions."
+
+
+@mcp.tool()
+def process_pending_queue(limit: int = 10) -> str:
+    """Process pending items in the memory queue.
+
+    Use this when there are unprocessed memories from previous sessions.
+    This automatically retries failed items and processes new ones.
+
+    Args:
+        limit: Max items to process (default 10)
+    """
+    try:
+        # Process retryable items first
+        retryable = db.dequeue_retryable(limit=limit)
+        success = 0
+        failed = 0
+
+        for item in retryable:
+            try:
+                _process_queue_item(item)
+                db.mark_processed(item["id"])
+                success += 1
+            except Exception as e:
+                _log.warning(f"重试失败 #{item['id']}: {e}")
+                db.mark_failed(item["id"], str(e))
+                failed += 1
+
+        # Then process pending items
+        pending = db.dequeue(limit=limit - success)
+        for item in pending:
+            try:
+                _process_queue_item(item)
+                db.mark_processed(item["id"])
+                success += 1
+            except Exception as e:
+                _log.warning(f"处理失败 #{item['id']}: {e}")
+                db.mark_failed(item["id"], str(e))
+                failed += 1
+
+        # Get final queue stats
+        stats = db.queue_stats()
+        queue_status = {r["status"]: r["cnt"] for r in stats}
+
+        return json.dumps({
+            "processed": success,
+            "failed": failed,
+            "queue_status": queue_status,
+        }, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        return f"Error processing queue: {str(e)}"
+
+
+@mcp.tool()
+def get_queue_status() -> str:
+    """Get the current status of the memory processing queue.
+
+    Use this to check if there are pending items that need processing.
+    """
+    try:
+        stats = db.queue_stats()
+        queue_status = {r["status"]: r["cnt"] for r in stats}
+
+        # Get recent failed items for debugging
+        conn = db.connect()
+        failed_items = conn.execute("""
+            SELECT id, hook_event, project, last_error, retry_count, created_at
+            FROM pending_queue
+            WHERE status IN ('failed', 'retry')
+            ORDER BY created_at DESC LIMIT 5
+        """).fetchall()
+
+        result = {
+            "queue_status": queue_status,
+            "recent_failed": [dict(item) for item in failed_items] if failed_items else [],
+        }
+
+        return json.dumps(result, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        return f"Error getting queue status: {str(e)}"
 
 
 # ── Resources ────────────────────────────────────────────────────
