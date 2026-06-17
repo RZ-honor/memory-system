@@ -104,6 +104,8 @@ class MemoryHandler(SimpleHTTPRequestHandler):
             "/api/reasoning-chains/extract": self._api_extract_reasoning,
             "/api/claude-sessions/extract": self._api_claude_session_extract,
             "/api/claude-sessions/batch-extract": self._api_claude_batch_extract,
+            "/api/reasoning-chains/cleanup": self._api_cleanup_reasoning_chains,
+            "/api/memories/cleanup-generic": self._api_cleanup_generic_memories,
         }
 
         handler = routes.get(path)
@@ -371,6 +373,17 @@ class MemoryHandler(SimpleHTTPRequestHandler):
     def _api_cleanup_memories(self, body=None):
         from lib import pruner
         stats = pruner.run_pruning_cycle()
+        self._json_response({"status": "completed", "stats": stats})
+
+    def _api_cleanup_reasoning_chains(self, body=None):
+        """Clean up low-quality reasoning chains."""
+        min_importance = (body or {}).get("min_importance", 4)
+        stats = db.cleanup_low_quality_reasoning_chains(min_importance=min_importance)
+        self._json_response({"status": "completed", "stats": stats})
+
+    def _api_cleanup_generic_memories(self, body=None):
+        """Clean up memories with generic/useless narratives."""
+        stats = db.cleanup_generic_memories()
         self._json_response({"status": "completed", "stats": stats})
 
     def _api_stats_detailed(self, params=None):

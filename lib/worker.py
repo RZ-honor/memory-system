@@ -193,7 +193,7 @@ def _process_queue_item(item):
             session_uuid=session,
         )
     elif event == "session_end":
-        extra = _safe_json(item.get("extra"), default={}) or {}
+        extra = _safe_json(item["extra"], default={}) or {}
         interactions = extra.get("interactions", [])
         if interactions:
             # Batch extract observations (raises on LLM failure → triggers retry)
@@ -201,6 +201,13 @@ def _process_queue_item(item):
             _log.info(f"SessionEnd [{session}]: saved {saved} observations")
             # Generate reflection (raises on LLM failure → triggers retry)
             observer.process_reflection(project, session, interactions)
+            # Extract solution-oriented memories (traces back from solutions to problems)
+            try:
+                solution_saved = observer.process_solution_extraction(project, session, interactions)
+                if solution_saved:
+                    _log.info(f"SessionEnd [{session}]: extracted {solution_saved} solution memories")
+            except Exception as e:
+                _log.warning(f"Solution extraction failed (non-blocking): {e}")
             # Extract reusable Skill from session
             try:
                 skill_id = observer.process_skill_extraction(project, session, interactions)

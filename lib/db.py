@@ -960,3 +960,145 @@ def count_reasoning_chains(project=None):
     if project:
         return conn.execute("SELECT COUNT(*) FROM reasoning_chains WHERE project=? AND is_active=1", (project,)).fetchone()[0]
     return conn.execute("SELECT COUNT(*) FROM reasoning_chains WHERE is_active=1").fetchone()[0]
+
+
+def find_similar_reasoning_chains(question, project, threshold=0.5, limit=3):
+    """Find similar reasoning chains by FTS match on question.
+
+    Returns list of (chain, rank) tuples, most similar first.
+    """
+    conn = connect()
+    # Build FTS query from question words
+    words = [w for w in question.replace('"', '').split() if len(w) >= 2]
+    if not words:
+        return []
+    fts_query = " OR ".join(f'"{w}"' for w in words[:10])
+    sql = """
+        SELECT rc.*, rank
+        FROM reasoning_chains_fts
+        JOIN reasoning_chains rc ON rc.id = reasoning_chains_fts.rowid
+        WHERE reasoning_chains_fts MATCH ? AND rc.is_active=1 AND rc.project=?
+        ORDER BY rank
+        LIMIT ?
+    """
+    try:
+        rows = conn.execute(sql, (fts_query, project, limit)).fetchall()
+        return [(dict(r), r["rank"]) for r in rows]
+    except sqlite3.OperationalError:
+        return []
+
+
+def merge_reasoning_chains(old_id, new_data):
+    """Merge a new reasoning chain into an existing one.
+
+    Updates the existing chain with richer information from the new extraction.
+    """
+    conn = connect()
+    # Get existing chain
+    existing = conn.execute("SELECT * FROM reasoning_chains WHERE id=?", (old_id,)).fetchone()
+    if not existing:
+        return False
+
+    # Merge: prefer more complete data
+    updates = {}
+    if new_data.get("outcome") and new_data["outcome"] != "pending":
+        updates["outcome"] = new_data["outcome"]
+    if new_data.get("outcome_summary"):
+        old_summary = existing["outcome_summary"] or ""
+        if len(new_data["outcome_summary"]) > len(old_summary):
+            updates["outcome_summary"] = new_data["outcome_summary"]
+    if new_data.get("failure_reason") and not existing["failure_reason"]:
+        updates["failure_reason"] = new_data["failure_reason"]
+    if new_data.get("extracted_facts"):
+        try:
+            old_facts = json.loads(existing["extracted_facts"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            old_facts = []
+        new_facts = new_data["extracted_facts"]
+        merged = list(set(old_facts + new_facts))
+        if len(merged) > len(old_facts):
+            updates["extracted_facts"] = json.dumps(merged, ensure_ascii=False)
+    if new_data.get("steps"):
+        try:
+            old_steps = json.loads(existing["steps"] or "[]") if isinstance(existing["steps"], str) else (existing["steps"] or [])
+        except (json.JSONDecodeError, TypeError):
+            old_steps = []
+        if len(new_data["steps"]) > len(old_steps):
+            updates["steps"] = json.dumps(new_data["steps"], ensure_ascii=False)
+    if new_data.get("importance") and (new_data["importance"] or 0) > (existing["importance"] or 0):
+        updates["importance"] = new_data["importance"]
+
+    if updates:
+        updates["access_count"] = (existing["access_count"] or 0) + 1
+        sets = ", ".join(f"{k}=?" for k in updates)
+        vals = list(updates.values()) + [old_id]
+        conn.execute(f"UPDATE reasoning_chains SET {sets}, updated_at=CURRENT_TIMESTAMP WHERE id=?", vals)
+        conn.commit()
+
+    return True
+
+
+def cleanup_low_quality_reasoning_chains(min_importance=4):
+    """Remove low-quality reasoning chains.
+
+    Criteria for removal:
+    - importance < min_importance
+    - outcome='failure' with no failure_reason (no actionable info)
+    - No steps (empty reasoning)
+    """
+    conn = connect()
+
+    # 1. Remove low-importance chains
+    r1 = conn.execute(
+        "UPDATE reasoning_chains SET is_active=0 WHERE is_active=1 AND importance < ?",
+        (min_importance,)
+    ).rowcount
+
+    # 2. Remove failure chains with no reason
+    r2 = conn.execute(
+        "UPDATE reasoning_chains SET is_active=0 WHERE is_active=1 AND outcome='failure' AND (failure_reason IS NULL OR failure_reason='')"
+    ).rowcount
+
+    # 3. Remove chains with no steps
+    r3 = conn.execute(
+        "UPDATE reasoning_chains SET is_active=0 WHERE is_active=1 AND (steps IS NULL OR steps='[]' OR steps='null')"
+    ).rowcount
+
+    conn.commit()
+    total = r1 + r2 + r3
+    return {"deactivated": total, "low_importance": r1, "failure_no_reason": r2, "no_steps": r3}
+
+
+def cleanup_generic_memories():
+    """Remove memories with generic/useless narratives.
+
+    Criteria for removal:
+    - narrative contains generic phrases like "从推理中提取的知识"
+    - title starts with "推理提取:" (old format)
+    - narrative is too short (< 20 chars) and has no facts
+    """
+    conn = connect()
+
+    # 1. Remove "推理提取" memories with generic narrative
+    r1 = conn.execute("""
+        UPDATE memories SET is_active=0 WHERE is_active=1
+        AND title LIKE '推理提取:%'
+        AND (narrative LIKE '%从推理中提取的知识%' OR narrative LIKE '%推理中提取%')
+    """).rowcount
+
+    # 2. Remove memories with very short narrative and no facts
+    r2 = conn.execute("""
+        UPDATE memories SET is_active=0 WHERE is_active=1
+        AND (narrative IS NULL OR length(narrative) < 20)
+        AND (facts IS NULL OR facts = '[]' OR facts = 'null')
+    """).rowcount
+
+    # 3. Remove memories with "从推理中提取的知识" in narrative
+    r3 = conn.execute("""
+        UPDATE memories SET is_active=0 WHERE is_active=1
+        AND narrative LIKE '%从推理中提取的知识%'
+    """).rowcount
+
+    conn.commit()
+    total = r1 + r2 + r3
+    return {"deactivated": total, "old_reasoning_format": r1, "no_narrative_or_facts": r2, "generic_narrative": r3}

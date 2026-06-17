@@ -86,12 +86,19 @@ def _process_queue_item(item):
             session_uuid=session,
         )
     elif event == "session_end":
-        extra = _safe_json(item.get("extra"), default={}) or {}
+        extra = _safe_json(item["extra"], default={}) or {}
         interactions = extra.get("interactions", [])
         if interactions:
             saved = observer.process_batch(project, interactions, session_uuid=session)
             _log.info(f"SessionEnd [{session}]: saved {saved} observations")
             observer.process_reflection(project, session, interactions)
+            # Extract solution-oriented memories
+            try:
+                solution_saved = observer.process_solution_extraction(project, session, interactions)
+                if solution_saved:
+                    _log.info(f"SessionEnd [{session}]: extracted {solution_saved} solution memories")
+            except Exception as e:
+                _log.warning(f"Solution extraction failed (non-blocking): {e}")
     else:
         _log.debug(f"未处理的队列事件: {event}")
 

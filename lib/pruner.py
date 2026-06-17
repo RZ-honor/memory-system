@@ -1,9 +1,14 @@
-"""记忆剪枝：FSRS 衰减、过期清理、去重、质量过滤、模式泛化
+"""记忆剪枝：FSRS 衰减、过期清理、去重、质量过滤、模式泛化、渐进式遗忘
 
 FSRS (Free Spaced Repetition Scheduler) decay model:
   R(t) = (1 + t/(9*S))^(-1)
 where R is retention, t is time since last review, S is stability.
 R < 0.1 marks memory for cleanup.
+
+渐进式遗忘机制：
+- 访问强化：被检索/引用的记忆重要性提升
+- 矛盾淘汰：被新记忆标记为过时的自动降权
+- 验证衰减：长期未被验证的推测性记忆加速衰减
 """
 import json, time, math
 from lib import db, llm, logger
@@ -15,10 +20,17 @@ FSRS_DECAY_FACTOR = 9.0  # Standard FSRS decay factor
 RETENTION_THRESHOLD = 0.1  # Below this, mark for cleanup
 STABILITY_BOOST_ON_ACCESS = 1.3  # Multiplier when memory is accessed
 
+# Progressive forgetting parameters
+ACCESS_BOOST = 1.2  # Importance boost per access
+SUPERSEDED_DECAY = 0.5  # Importance multiplier for superseded memories
+UNVERIFIED_DECAY_RATE = 0.05  # Daily decay for unverified memories
+VERIFICATION_KEYWORDS = ["验证", "确认", "测试通过", "有效", "解决", "verified", "confirmed", "tested"]
+
 
 def run_pruning_cycle(project=None):
     """Run complete pruning cycle."""
-    stats = {"expired": 0, "decayed": 0, "deduped": 0, "generalized": 0, "low_quality": 0}
+    stats = {"expired": 0, "decayed": 0, "deduped": 0, "generalized": 0, "low_quality": 0,
+             "access_boosted": 0, "superseded_decayed": 0, "unverified_decayed": 0}
     projects = _get_active_projects(project)
     for proj in projects:
         try:
@@ -27,6 +39,9 @@ def run_pruning_cycle(project=None):
             stats["deduped"] += _deduplicate(proj)
             stats["generalized"] += _generalize_patterns(proj)
             stats["low_quality"] += _remove_low_quality(proj)
+            stats["access_boosted"] += _apply_access_boost(proj)
+            stats["superseded_decayed"] += _apply_superseded_decay(proj)
+            stats["unverified_decayed"] += _apply_unverified_decay(proj)
         except Exception as e:
             _log.error(f"剪枝错误 [{proj}]: {e}")
     _log.info(f"剪枝周期完成: {stats}")
@@ -250,3 +265,104 @@ def _title_similar(a, b):
         return False
     overlap = len(a_words & b_words)
     return overlap / min(len(a_words), len(b_words)) > 0.5
+
+
+# ── Progressive Forgetting Mechanisms ────────────────────────────
+
+def _apply_access_boost(project):
+    """Boost importance for memories that have been accessed recently.
+
+    Memories that are retrieved or referenced should be reinforced.
+    """
+    conn = db.connect()
+    # Find memories accessed in the last 7 days
+    rows = conn.execute("""
+        SELECT id, importance, access_count FROM memories
+        WHERE project=? AND is_active=1 AND access_count > 0
+        AND last_accessed_at > datetime('now', '-7 days')
+    """, (project,)).fetchall()
+
+    count = 0
+    for r in rows:
+        old_importance = r["importance"] or 5
+        # Boost based on access count (diminishing returns)
+        boost = min(ACCESS_BOOST ** min(r["access_count"], 5), 1.5)
+        new_importance = min(10, int(old_importance * boost))
+        if new_importance > old_importance:
+            db.update_memory(r["id"], importance=new_importance)
+            count += 1
+
+    return count
+
+
+def _apply_superseded_decay(project):
+    """Decay importance for memories that have been superseded.
+
+    When a new memory supersedes an old one, the old one should lose importance.
+    """
+    conn = db.connect()
+    # Find memories that have been superseded (have supersedes link)
+    rows = conn.execute("""
+        SELECT id, importance FROM memories
+        WHERE project=? AND is_active=1 AND supersedes IS NOT NULL AND supersedes != ''
+    """, (project,)).fetchall()
+
+    count = 0
+    for r in rows:
+        old_importance = r["importance"] or 5
+        new_importance = max(1, int(old_importance * SUPERSEDED_DECAY))
+        if new_importance < old_importance:
+            db.update_memory(r["id"], importance=new_importance)
+            count += 1
+
+    return count
+
+
+def _apply_unverified_decay(project):
+    """Decay importance for unverified memories over time.
+
+    Memories that contain speculative information and haven't been verified
+    should gradually lose importance.
+    """
+    conn = db.connect()
+    # Find memories without verification keywords in their narrative
+    rows = conn.execute("""
+        SELECT id, importance, created_at, narrative FROM memories
+        WHERE project=? AND is_active=1 AND category='observation'
+    """, (project,)).fetchall()
+
+    count = 0
+    for r in rows:
+        narrative = (r["narrative"] or "").lower()
+        # Check if memory contains verification keywords
+        is_verified = any(kw in narrative for kw in VERIFICATION_KEYWORDS)
+        if is_verified:
+            continue
+
+        # Calculate age in days
+        try:
+            created = r["created_at"]
+            if created:
+                from datetime import datetime
+                if isinstance(created, str):
+                    created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                else:
+                    created_dt = created
+                age_days = (datetime.now() - created_dt.replace(tzinfo=None)).days
+            else:
+                age_days = 0
+        except:
+            age_days = 0
+
+        if age_days < 7:
+            continue  # Don't decay very new memories
+
+        old_importance = r["importance"] or 5
+        # Apply daily decay
+        decay_factor = (1 - UNVERIFIED_DECAY_RATE) ** min(age_days, 30)
+        new_importance = max(1, int(old_importance * decay_factor))
+        if new_importance < old_importance:
+            db.update_memory(r["id"], importance=new_importance)
+            count += 1
+
+    return count
